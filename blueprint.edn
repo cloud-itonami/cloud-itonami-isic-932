@@ -1,0 +1,74 @@
+{:blueprint/id "cloud-itonami-isic-932"
+ :blueprint/name "Amusement & Recreation Facility Operations Coordination"
+ :blueprint/isic "932"
+ :blueprint/domain "amusement-facility-administration"
+ :blueprint/description
+ "LLM-driven administrative coordination for amusement parks, arcades, and
+  recreational facilities. Covers facility/attraction booking scheduling,
+  ride/attraction maintenance-schedule logistics, guest-services coordination,
+  and safety concern flagging. Explicitly excludes ride-safety-inspection
+  sign-offs, pricing/programming policy, and safety-authority overrides."
+
+ :blueprint/scope
+ {:included ["facility-booking-scheduling"
+             "maintenance-schedule-coordination"
+             "supply-logistics"
+             "guest-services-logistics"
+             "safety-concern-flagging"]
+  :excluded ["ride-safety-inspection-sign-offs"
+             "pricing-programming-policy"
+             "operational-readiness-decisions"
+             "safety-authority-overrides"]}
+
+ :blueprint/operations
+ [{:op/id :schedule-facility-booking
+   :op/description "Venue/attraction-area booking scheduling"
+   :op/effect :propose}
+  {:op/id :coordinate-maintenance-schedule-proposal
+   :op/description "Administrative maintenance-scheduling PROPOSAL only"
+   :op/effect :propose}
+  {:op/id :coordinate-supply-request
+   :op/description "Non-safety-critical consumables supply coordination"
+   :op/effect :propose}
+  {:op/id :coordinate-guest-services-logistics
+   :op/description "Guest check-in/ticketing/wayfinding logistics coordination"
+   :op/effect :propose}
+  {:op/id :flag-safety-concern
+   :op/description "Facility/ride/guest safety concerns (always escalates)"
+   :op/effect :propose}]
+
+ :blueprint/governor
+ {:hard-checks
+  [{:check/id :facility-unverified
+    :check/rule "Target facility must be registered AND verified"
+    :check/overridable? false}
+   {:check/id :effect-not-propose
+    :check/rule "Effect must be :propose"
+    :check/overridable? false}
+   {:check/id :scope-exclusion
+    :check/rule "No ride-safety-inspection sign-offs, pricing/programming policy, or safety-authority overrides"
+    :check/overridable? false}]
+  :escalate-ops [:flag-safety-concern]
+  :confidence-floor 0.6}
+
+ :blueprint/phases
+ [{:phase/id 0
+   :phase/name "read-only"
+   :phase/auto #{}}
+  {:phase/id 1
+   :phase/name "facility-booking + maintenance-schedule"
+   :phase/auto #{}}
+  {:phase/id 2
+   :phase/name "+ supply-coordination + guest-services"
+   :phase/auto #{}}
+  {:phase/id 3
+   :phase/name "auto-commit with escalation"
+   :phase/auto #{:schedule-facility-booking
+                  :coordinate-maintenance-schedule-proposal
+                  :coordinate-supply-request
+                  :coordinate-guest-services-logistics}
+   :phase/always-escalate #{:flag-safety-concern}}]
+
+ :blueprint/adr "ADR-2607154200"
+ :blueprint/wave "4"
+ :blueprint/status "implemented"}
