@@ -20,10 +20,10 @@ cd cloud-itonami-isic-932
 ## 2. Run tests
 
 ```bash
-clojure -M:test
+clojure -M:dev:test
 ```
 
-Expect green if maturity is `unknown`. Fix failures before operating.
+Expect green. Fix failures before operating.
 
 ## 3. Open the product face
 

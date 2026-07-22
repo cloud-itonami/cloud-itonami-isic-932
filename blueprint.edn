@@ -8,4 +8,41 @@
  :itonami.blueprint/robotics false
  :itonami.blueprint/required-technologies [:identity :forms :dmn :bpmn :audit-ledger]
  :itonami.blueprint/status :public-oss
- :itonami.blueprint/maturity :implemented}
+ :itonami.blueprint/maturity :implemented
+ :itonami.blueprint/implemented-slice
+ "DefaultAdvisor (amusementfacilityops.advisor/Advisor protocol seam over
+ the five unchanged per-op advisor fns) |- amusementfacilityops.governor
+ (three HARD, permanent checks: facility-unverified, effect-not-propose,
+ scope-exclusion), a REAL compiled langgraph-clj StateGraph
+ (langgraph.graph, amusementfacilityops.operation/build), append-only
+ audit ledger (amusementfacilityops.store/ledger + append-ledger!,
+ MemStore). Fixes a prior gap: operation.cljc's own docstring claimed
+ 'langgraph-clj StateGraph' but the actual code was a hand-rolled
+ (-> state intake advise govern decide (case action ...)) threading
+ pipeline -- zero require of langgraph.graph, zero use of
+ state-graph/add-node/compile-graph anywhere in the file -- and its
+ `decide` step could never actually reach the `commit` step (dead code)
+ while amusementfacilityops.phase's auto-commit table was defined and
+ unit-tested in isolation but never consulted by any decision logic.
+ Now: a genuinely compiled StateGraph (:intake -> :advise -> :govern ->
+ :decide -+-> :commit / :request-approval -> :commit / :hold) with
+ interrupt-before #{:request-approval} + in-memory checkpointer for real
+ human-in-the-loop resume, and amusementfacilityops.phase's
+ auto-commits-at-phase? genuinely gates the :commit route. The Governor
+ (three HARD, permanent, un-overridable checks) and the append-only
+ audit ledger were already genuinely wired in the pre-graph pipeline
+ (store/append-ledger! was real, not dead code) -- both preserved
+ unchanged. Five ops (:schedule-facility-booking /
+ :coordinate-maintenance-schedule-proposal / :coordinate-supply-request /
+ :coordinate-guest-services-logistics / :flag-safety-concern), all
+ :effect :propose only. :flag-safety-concern ALWAYS escalates to a human
+ operator via the compiled graph's :request-approval node
+ (interrupt-before, checkpoint-based resume), proven end-to-end by
+ test/amusementfacilityops/operation_test.clj (commit / hard-hold
+ (unverified facility) / scope-exclusion hold / phase-hold /
+ escalate-approve / escalate-reject through the REAL compiled graph),
+ plus a `clojure -M:dev:run` demo runner producing real ledger entries
+ for every scenario. Test suite rewritten from an unfalsifiable
+ assert+println harness (0 deftest/is, unconditionally printed 'All
+ tests passed!' regardless of whether the prior assertions held) to real
+ clojure.test deftest/is across advisor/governor/phase/store/operation."}

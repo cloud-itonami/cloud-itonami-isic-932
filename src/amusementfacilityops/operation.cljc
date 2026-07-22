@@ -1,164 +1,231 @@
 (ns amusementfacilityops.operation
-  "langgraph-clj StateGraph for the amusement/recreation facility coordination actor.
+  "OperationActor -- one amusement/recreation facility coordination request
+  = one supervised actor run, expressed as a REAL compiled `langgraph-clj`
+  `StateGraph` (`langgraph.graph/state-graph` + `compile-graph`). The
+  advisor (`amusementfacilityops.advisor/Advisor`) is sealed into a single
+  node (`:advise`); its proposal is ALWAYS routed through the independent
+  `amusementfacilityops.governor` (`:govern`) and the rollout-phase gate
+  (`:decide`) before anything commits to the SSoT.
 
-  The state machine flow is:
-  intake → advise → govern → decide → {commit | hold | request-approval} | audit
+  This replaces the previous `run-proposal`, which was a plain
+  `(-> state intake advise govern decide (case action ...))` threading
+  pipeline that never required `langgraph.graph` and never touched
+  `state-graph`/`add-node`/`compile-graph` at all -- despite this
+  namespace's own former docstring calling it \"the langgraph-clj
+  StateGraph\". That claim was false; this is the real thing. Two
+  concrete structural bugs the old pipeline had, now fixed:
 
-  This is the operational orchestration layer that drives proposals through
-  the advisor and governor, and decides on commitment based on governance rules."
-  (:require [amusementfacilityops.store :as store]
+    1. `decide` never emitted `:action :commit` -- the `commit` step
+       function existed but nothing in the old `decide` logic could ever
+       route to it. Every clean, non-safety proposal fell through to
+       `:request-approval` regardless of how low-risk the op was.
+    2. `amusementfacilityops.phase`'s auto-commit table (`phases`,
+       `auto-commits-at-phase?`) was fully defined and unit-tested in
+       isolation, but the old `decide` never called it -- phase rollout
+       was inert decoration, not a real gate.
+
+  Both are fixed here by genuinely wiring `phase/auto-commits-at-phase?`
+  into `:decide`: a clean, non-escalating proposal now actually reaches
+  `:commit` when its op is in the current phase's auto-commit set, and
+  is held (distinguished by `:reason :not-in-phase-auto-set`) otherwise.
+
+  State machine:
+  intake -> advise -> govern -> decide -+-> commit
+                                         +-> request-approval -> commit
+                                         +-> hold
+
+  Everything the actor depends on is injected, so each is a swap, not a
+  rewrite:
+    - the Store    (`amusementfacilityops.store/MemStore`, or any `Store` impl)
+    - the Advisor  (`amusementfacilityops.advisor/default-advisor` by
+                     default -- a thin protocol seam over the SAME five
+                     per-op advisor functions the old pipeline called
+                     inline, unchanged; a real LLM advisor is a swap)
+    - the Phase    (0->3 rollout; passed per-request via `:phase-num`,
+                     not frozen at `build` time)
+
+  One graph run = one facility-coordination request. No unbounded inner
+  loop -- each run is auditable and checkpointed. Every commit/hold
+  decision fact lands in `amusementfacilityops.store`'s append-only
+  ledger (`store/append-ledger!`) -- that call was already genuinely
+  wired (not dead code) in the pre-graph pipeline, and that wiring is
+  preserved here, now reachable from both the `:commit` and `:hold`
+  terminal nodes with the SAME ledger-fact shape (`:timestamp
+  :operation :facility-id :status ...`) the old pipeline used.
+
+  Human-in-the-loop = real approval workflow:
+  `interrupt-before #{:request-approval}` pauses the actor at the
+  `:request-approval` node until a human operator resumes it with a
+  decision. `:flag-safety-concern` ALWAYS reaches this node -- see
+  `escalate?` below, which agrees with `amusementfacilityops.governor`'s
+  scope-exclusion allowance for that op and with `phase/always-escalates?`
+  at phase 3."
+  (:require [langgraph.graph :as g]
+            [langgraph.checkpoint :as cp]
             [amusementfacilityops.advisor :as advisor]
             [amusementfacilityops.governor :as governor]
-            [amusementfacilityops.phase :as phase]))
+            [amusementfacilityops.phase :as phase]
+            [amusementfacilityops.store :as store]))
 
-;; ---------------------- state schema ----------------------
+;; ---------------------- portable timestamp ----------------------
 
-(defn init-state
-  "Create initial state for a proposal intake."
-  [store request]
-  {:store store
-   :request request
-   :proposal nil
-   :governance {:violations [] :decision nil}
-   :action nil
-   :ledger-entry nil})
+(defn- now []
+  #?(:clj (java.util.Date.)
+     :cljs (js/Date.)))
 
-;; ---------------------- step functions ----------------------
+;; ---------------------- audit-fact builders ----------------------
+;; Same ledger-fact shape the pre-graph pipeline used:
+;; {:timestamp .. :operation .. :facility-id .. :status .. [:violations ..]}
 
-(defn intake
-  "Step 1: Intake the request, identify operation type."
-  [state]
-  (let [request (:request state)
-        op-type (:operation request)]
-    (assoc state :intake-op op-type)))
+(defn- hold-fact
+  [request proposal violations reason]
+  {:timestamp (now)
+   :operation (:operation request)
+   :facility-id (:facility-id proposal)
+   :status :held
+   :reason reason
+   :violations violations})
 
-(defn advise
-  "Step 2: Advisor generates proposal with confidence and reasoning."
-  [state]
-  (let [request (:request state)
-        store (:store state)
-        op-type (:operation request)]
-    (case op-type
-      :schedule-facility-booking
-      (assoc state :proposal
-             (advisor/advise-booking-proposal
-              store (:facility-id request) (:event-name request)
-              (:event-date request) (:party-size request)))
+(defn- commit-fact
+  [request proposal approval]
+  (cond-> {:timestamp (now)
+           :operation (:operation request)
+           :facility-id (:facility-id proposal)
+           :status :committed
+           :proposal proposal}
+    approval (assoc :approved-by (:by approval))))
 
-      :coordinate-maintenance-schedule-proposal
-      (assoc state :proposal
-             (advisor/advise-maintenance-proposal
-              store (:facility-id request) (:attraction-id request)
-              (:maintenance-type request) (:scheduled-date request)))
+(defn- approval-requested-fact
+  [request proposal phase-num reason]
+  {:timestamp (now)
+   :operation (:operation request)
+   :facility-id (:facility-id proposal)
+   :status :pending-approval
+   :reason reason
+   :phase phase-num
+   :confidence (:confidence proposal)})
 
-      :coordinate-supply-request
-      (assoc state :proposal
-             (advisor/advise-supply-request
-              store (:facility-id request) (:supply-type request)
-              (:quantity request) (:requested-delivery-date request)))
+;; ---------------------- escalation predicate ----------------------
 
-      :coordinate-guest-services-logistics
-      (assoc state :proposal
-             (advisor/advise-guest-services
-              store (:facility-id request) (:service-type request)
-              (:details request)))
+(defn escalate?
+  "A clean proposal escalates to human approval (`:request-approval`,
+  a real `interrupt-before` pause) when: the advisor itself flagged it
+  (`:escalate?`, currently only ever set by `advisor/advise-safety-concern`),
+  OR the op is `:flag-safety-concern` (belt-and-suspenders -- agrees with
+  `amusementfacilityops.phase/always-escalates?` at phase 3, and with
+  `amusementfacilityops.governor`'s allowance for that op alone in its
+  scope-exclusion scan)."
+  [proposal phase-num]
+  (boolean (or (:escalate? proposal)
+               (= :flag-safety-concern (:operation proposal))
+               (phase/always-escalates? phase-num (:operation proposal)))))
 
-      :flag-safety-concern
-      (assoc state :proposal
-             (advisor/advise-safety-concern
-              store (:facility-id request) (:concern-type request)
-              (:description request) (:severity request)))
+;; ---------------------- compiled StateGraph ----------------------
 
-      (assoc state :proposal {:status :error :reason "Unknown operation type"}))))
+(defn build
+  "Compiles an OperationActor graph bound to `store`. opts:
+    :advisor      -- an `amusementfacilityops.advisor/Advisor`
+                      (default: `advisor/default-advisor`)
+    :checkpointer -- a `langgraph.checkpoint/Checkpointer`
+                     (default: in-memory `cp/mem-checkpointer`)
 
-(defn govern
-  "Step 3: Governor evaluates the proposal against HARD checks."
-  [state]
-  (let [proposal (:proposal state)
-        store (:store state)
-        gov-result (governor/govern store proposal)]
-    (assoc state :governance gov-result)))
+  The compiled graph's input map: `{:request .. :phase-num ..}` (phase is
+  per-request, not frozen at `build` time)."
+  [store & [{:keys [advisor checkpointer]
+             :or {advisor (advisor/default-advisor)
+                  checkpointer (cp/mem-checkpointer)}}]]
+  (-> (g/state-graph
+       {:channels
+        {:request {:default nil}
+         :phase-num {:default 0}
+         :proposal {:default nil}
+         :violations {:default nil}
+         :decision {:default nil}
+         :approval {:default nil}
+         :audit {:reducer into :default []}}})
 
-(defn decide
-  "Step 4: Decide on next action based on governance decision.
-  - If all checks pass: commit (for auto-commit ops) or request-approval (others)
-  - If any check fails: hold with violations
-  - If escalation-flagged: always escalate"
-  [state]
-  (let [gov-result (:governance state)
-        proposal (:proposal state)
-        op-id (:operation proposal)]
-    (if (:passes? gov-result)
-      (if (or (:escalate? proposal) (= op-id :flag-safety-concern))
-        (assoc state :action :escalate)
-        (assoc state :action :request-approval))
-      (assoc state :action :hold))))
+      (g/add-node :intake (fn [s] s))
 
-(defn commit
-  "Step 5a: Commit proposal to coordination log."
-  [state]
-  (let [store (:store state)
-        proposal (:proposal state)
-        ledger-fact {:timestamp (java.util.Date.)
-                     :operation (:operation proposal)
-                     :facility-id (:facility-id proposal)
-                     :status :committed}]
-    (store/commit-record! store proposal)
-    (store/append-ledger! store ledger-fact)
-    (assoc state :action :committed :ledger-entry ledger-fact)))
+      (g/add-node :advise
+        (fn [{:keys [request]}]
+          {:proposal (advisor/advise advisor request store)}))
 
-(defn hold
-  "Step 5b: Hold proposal (violations found)."
-  [state]
-  (let [store (:store state)
-        gov-result (:governance state)
-        ledger-fact {:timestamp (java.util.Date.)
-                     :operation (:operation (:proposal state))
-                     :facility-id (:facility-id (:proposal state))
-                     :status :held
-                     :violations (:violations gov-result)}]
-    (store/append-ledger! store ledger-fact)
-    (assoc state :action :held :ledger-entry ledger-fact)))
+      (g/add-node :govern
+        (fn [{:keys [proposal]}]
+          {:violations (:violations (governor/govern store proposal))}))
 
-(defn request-approval
-  "Step 5c: Request human approval (governance passed, but op requires it)."
-  [state]
-  (let [store (:store state)
-        proposal (:proposal state)
-        ledger-fact {:timestamp (java.util.Date.)
-                     :operation (:operation proposal)
-                     :facility-id (:facility-id proposal)
-                     :status :pending-approval}]
-    (store/append-ledger! store ledger-fact)
-    (assoc state :action :pending-approval :ledger-entry ledger-fact)))
+      (g/add-node :decide
+        (fn [{:keys [request proposal violations phase-num]}]
+          (let [clean? (empty? violations)
+                escalating? (and clean? (escalate? proposal phase-num))
+                auto-commit? (and clean? (not escalating?)
+                                   (phase/auto-commits-at-phase?
+                                    phase-num (:operation proposal)))]
+            (cond
+              ;; HARD governor violations are a permanent block -- NEVER
+              ;; routed through human approval, straight to :hold.
+              (not clean?)
+              {:decision :hold
+               :audit [(hold-fact request proposal violations :governor-violation)]}
 
-(defn escalate
-  "Step 5d: Escalate safety concern or critical proposal."
-  [state]
-  (let [store (:store state)
-        proposal (:proposal state)
-        ledger-fact {:timestamp (java.util.Date.)
-                     :operation (:operation proposal)
-                     :facility-id (:facility-id proposal)
-                     :status :escalated}]
-    (store/append-ledger! store ledger-fact)
-    (assoc state :action :escalated :ledger-entry ledger-fact)))
+              escalating?
+              {:decision :escalate
+               :audit [(approval-requested-fact
+                        request proposal phase-num
+                        (if (= :flag-safety-concern (:operation proposal))
+                          :always-escalate
+                          :advisor-escalation))]}
 
-;; ---------------------- run proposal end-to-end ----------------------
+              auto-commit?
+              {:decision :commit}
 
-(defn run-proposal
-  "Execute the full state machine: intake → advise → govern → decide → action.
-  Returns final state with decision and any ledger updates."
-  [store request]
-  (let [state (init-state store request)]
-    (-> state
-        intake
-        advise
-        govern
-        decide
-        (as-> s (case (:action s)
-                  :commit (commit s)
-                  :hold (hold s)
-                  :request-approval (request-approval s)
-                  :escalate (escalate s)
-                  s)))))
+              :else
+              {:decision :hold
+               :audit [(hold-fact request proposal violations :not-in-phase-auto-set)]}))))
+
+      (g/add-node :request-approval
+        (fn [{:keys [request proposal approval violations]}]
+          (if (= :approved (:status approval))
+            {:decision :commit
+             :audit [{:timestamp (now) :operation (:operation request)
+                      :facility-id (:facility-id proposal)
+                      :status :approval-granted :by (:by approval)}]}
+            {:decision :hold
+             :audit [(assoc (hold-fact request proposal violations :approver-rejected)
+                            :status :approval-rejected)]})))
+
+      (g/add-node :commit
+        (fn [{:keys [request proposal approval]}]
+          (store/commit-record! store proposal)
+          (let [f (commit-fact request proposal approval)]
+            (store/append-ledger! store f)
+            {:audit [f]})))
+
+      (g/add-node :hold
+        (fn [{:keys [audit]}]
+          (when-let [hf (last (filter #(#{:held :approval-rejected} (:status %)) audit))]
+            (store/append-ledger! store hf))
+          {}))
+
+      (g/set-entry-point :intake)
+      (g/add-edge :intake :advise)
+      (g/add-edge :advise :govern)
+      (g/add-edge :govern :decide)
+
+      (g/add-conditional-edges :decide
+        (fn [{:keys [decision]}]
+          (case decision
+            :commit :commit
+            :escalate :request-approval
+            :hold)))
+
+      (g/add-conditional-edges :request-approval
+        (fn [{:keys [decision]}]
+          (if (= :commit decision) :commit :hold)))
+
+      (g/set-finish-point :commit)
+      (g/set-finish-point :hold)
+
+      (g/compile-graph
+       {:checkpointer checkpointer
+        :interrupt-before #{:request-approval}})))

@@ -29,14 +29,23 @@ This actor explicitly does **not** handle:
 
 **Modules**:
 - `store` — String-keyed facility/booking directory (MemStore, EDN-backed)
-- `advisor` — Proposal generation and rationale (LLM seam)
+- `advisor` — Proposal generation and rationale (LLM seam), sealed behind an
+  `Advisor` protocol (`default-advisor`) that `operation`'s `:advise` node drives
 - `governor` — Three HARD checks (facility verification, effect validation, scope exclusion)
-- `phase` — Rollout phases 0–3 (read-only → auto-commit with escalation)
-- `operation` — State machine: intake → advise → govern → decide → commit | hold | request-approval
-- `sim` — Demo driver
-- `test` — Comprehensive test suite
+- `phase` — Rollout phases 0–3 (read-only → auto-commit with escalation); genuinely
+  consulted by `operation`'s `:decide` node, not just unit-tested in isolation
+- `operation` — a REAL compiled `langgraph-clj` `StateGraph`
+  (`langgraph.graph/state-graph` + `compile-graph`):
+  `intake → advise → govern → decide -+-> commit`
+  `                                    +-> request-approval -> commit`
+  `                                    +-> hold`
+  Human-in-the-loop approval is a genuine `interrupt-before
+  #{:request-approval}` pause + checkpointed resume, not a synchronous return value.
+- `sim` — Demo driver, runs the compiled graph end-to-end for five scenarios
+- `test/` — `clojure.test` `deftest`/`is` suite across advisor, governor, phase,
+  store, and the compiled operation graph (`test/amusementfacilityops/*_test.clj`)
 
-**All modules are `.cljc`** (ClojureScript + JVM compatible).
+**All `src/` modules are `.cljc`** (ClojureScript + JVM compatible).
 
 ## Governor: Three HARD Checks
 
@@ -59,13 +68,13 @@ These are un-overridable, even with human approval.
 ### Tests
 
 ```bash
-clojure -M:test
+clojure -M:dev:test
 ```
 
 ### Demo
 
 ```bash
-clojure -M:dev -e "(amusementfacilityops.sim/run-all-demos)"
+clojure -M:dev:run
 ```
 
 ### Lint
@@ -73,6 +82,15 @@ clojure -M:dev -e "(amusementfacilityops.sim/run-all-demos)"
 ```bash
 clojure -M:lint
 ```
+
+## Offline Workspace Layout
+
+`deps.edn` pins `langgraph` via an in-monorepo `:local/root` path
+(`../../kotoba-lang/langgraph`), and the `:dev` alias overrides the transitive
+`langchain` dependency the same way (both PUBLIC, same pattern as
+`cloud-itonami-isic-869`). A bare single-repo checkout needs the sibling repos
+at `../../kotoba-lang/langgraph` and `../../kotoba-lang/langchain` relative to
+this repo's root — see `.github/workflows/ci.yml` for the exact layout.
 
 ## Rollout Phases
 
