@@ -201,17 +201,28 @@
 
 (defn- unreachable-auto-commit-ops
   "Ops that a phase's `:auto-commit` set promises will auto-commit, but
-  which this run observed the governor HARD-blocking on
-  `:scope-exclusion` -- i.e. the promised path is not reachable.
+  whose promised path this run found to be unreachable.
 
-  Derived by intersecting `phase/phases` with the run's own ledger, so
-  this reports nothing once the contradiction is resolved."
-  [ledger]
+  The discriminator is deliberately narrow: an op qualifies only if it
+  was HARD-blocked on `:scope-exclusion` AND never reached a commit
+  anywhere in the same run. An op that blocked once and committed
+  elsewhere is not unreachable -- that is the governor correctly
+  refusing one particular request, which is the behaviour we want, not
+  a contradiction. (Concretely: `:coordinate-guest-services-logistics`
+  blocks when an operator smuggles ride-safety sign-off text into it,
+  yet commits fine for a benign request, so it must NOT be reported
+  here; `:coordinate-maintenance-schedule-proposal` blocks even when
+  entirely benign, so it must.)
+
+  Derived from `phase/phases` and the run's own ledger and coordination
+  log, so this reports nothing once the contradiction is resolved."
+  [ledger records]
   (let [promised (into #{} (mapcat (comp :auto-commit val)) phase/phases)
         blocked (into #{} (comp (filter #(some #{:scope-exclusion} (rules-fired %)))
                                 (map :operation))
-                      (governor-holds ledger))]
-    (sort (map name (filter blocked promised)))))
+                      (governor-holds ledger))
+        committed (into #{} (map :operation) records)]
+    (sort (map name (filter #(and (blocked %) (not (committed %))) promised)))))
 
 ;; ----------------------------- rendering -----------------------------
 
@@ -375,7 +386,7 @@
         facilities (sort-by :facility-id (store/all-facilities db))
         bookings (sort-by :booking-id (store/all-bookings db))
         holds (governor-holds ledger)
-        unreachable (unreachable-auto-commit-ops ledger)
+        unreachable (unreachable-auto-commit-ops ledger records)
         attribution-gap (seq (filter #(and (not (approver-keys-present? %))
                                            (:approved-by (commit-fact-for ledger %)))
                                      records))]
@@ -433,7 +444,8 @@
             "The table above promises that "
             (str/join ", " (map #(str "<code>" (esc %) "</code>") unreachable))
             " auto-commits, but this run watched the governor HARD-block it on <code>scope-exclusion</code> "
-            "even for an entirely benign request. <code>governor/scope-exclusion-violations</code> scans "
+            "even for an entirely benign request, and never once let it commit. "
+            "<code>governor/scope-exclusion-violations</code> scans "
             "<code>(str proposal)</code>, and the advisor&rsquo;s own boilerplate rationale for that op contains the "
             "phrase &ldquo;not safety sign-off&rdquo;; a substring scan cannot tell a denial from an assertion, so the op "
             "blocks itself. The promised auto-commit path is unreachable. This paragraph is derived by "
