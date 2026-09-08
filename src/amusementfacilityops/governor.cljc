@@ -9,7 +9,7 @@
      pricing/programming policy, operational-readiness decisions, or safety-
      authority overrides is permanently blocked."
   (:require [amusementfacilityops.store :as store]
-            [clojure.string :as str]))
+            [kotoba.lang.text :as str]))
 
 ;; ---------------------- hard checks ----------------------
 
