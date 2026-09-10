@@ -38,7 +38,7 @@
  :effect :propose only. :flag-safety-concern ALWAYS escalates to a human
  operator via the compiled graph's :request-approval node
  (interrupt-before, checkpoint-based resume), proven end-to-end by
- test/amusementfacilityops/operation_test.clj (commit / hard-hold
+ test/amusementfacilityops/operation_test.kotoba (commit / hard-hold
  (unverified facility) / scope-exclusion hold / phase-hold /
  escalate-approve / escalate-reject through the REAL compiled graph),
  plus a `clojure -M:dev:run` demo runner producing real ledger entries
