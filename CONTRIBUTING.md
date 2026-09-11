@@ -7,19 +7,19 @@ This project is part of the cloud-itonami fleet and follows the governance outli
 ```bash
 git clone https://github.com/cloud-itonami/cloud-itonami-isic-932
 cd cloud-itonami-isic-932
-clojure -M:dev
+kbb -M:dev
 ```
 
 ## Running Tests
 
 ```bash
-clojure -M:test
+kbb -M:test
 ```
 
 ## Running Lint
 
 ```bash
-clojure -M:lint
+kbb -M:lint
 ```
 
 ## Code Style

@@ -68,19 +68,19 @@ These are un-overridable, even with human approval.
 ### Tests
 
 ```bash
-clojure -M:dev:test
+kbb -M:dev:test
 ```
 
 ### Demo
 
 ```bash
-clojure -M:dev:run
+kbb -M:dev:run
 ```
 
 ### Lint
 
 ```bash
-clojure -M:lint
+kbb -M:lint
 ```
 
 ## Offline Workspace Layout

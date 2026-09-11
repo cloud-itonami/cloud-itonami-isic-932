@@ -20,7 +20,7 @@ cd cloud-itonami-isic-932
 ## 2. Run tests
 
 ```bash
-clojure -M:dev:test
+kbb -M:dev:test
 ```
 
 Expect green. Fix failures before operating.
