@@ -27,7 +27,7 @@
   refusing something is not evidence that the governor works, so the
   requirement is enforced by the build rather than left to convention.
 
-  Usage: `clojure -M:dev:render-html [out-file]`
+  Usage: `kbb -M:dev:render-html [out-file]`
   (default `docs/samples/operator-console.html`)."
   (:require [jp-go-dds.skin]
             [kotoba.lang.text :as str]
@@ -403,7 +403,7 @@
      "<p><span class=\"badge\">read-only sample</span> <span class=\"badge\">governor-gated</span> "
      "<span class=\"badge\">safety concerns always escalate</span></p>\n"
      "<p class=\"subtitle\">Build-time output of <code>amusementfacilityops.render-html</code> "
-     "(<code>clojure -M:dev:render-html</code>). Every row below was read back out of "
+     "(<code>kbb -M:dev:render-html</code>). Every row below was read back out of "
      "<code>amusementfacilityops.store</code> after driving "
      "<code>amusementfacilityops.operation</code>&rsquo;s compiled <code>langgraph</code> StateGraph over this "
      "repo&rsquo;s own seed directory. Timestamps are deliberately omitted so the page is byte-identical "
